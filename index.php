@@ -1,5 +1,22 @@
 <?php
-session_start(); // Used to store API key, workspace ID, and date offset
+// VERY TOP: Configure error reporting
+error_reporting(E_ALL);
+ini_set('display_errors', 0); // Don't display errors to the user
+ini_set('log_errors', 1);    // Log errors
+ini_set('error_log', __DIR__ . '/php_error.log'); // Log to a file in the same directory
+
+ob_start(); // Start output buffering
+
+// Session start
+if (session_status() === PHP_SESSION_NONE) {
+    if (headers_sent($file, $line)) {
+        error_log("CRITICAL ERROR: Headers already sent in {$file} on line {$line} before session_start()! Sessions will FAIL.");
+    } else {
+        if (!session_start()) {
+            error_log("CRITICAL ERROR: session_start() FAILED. Check PHP error logs and session.save_path.");
+        }
+    }
+}
 
 // --- Configuration ---
 $apiBaseUrl = 'https://api.clockify.me/api/v1';
@@ -7,7 +24,7 @@ $tehranTimezoneIdentifier = 'Asia/Tehran';
 
 // --- Helper Function to call Clockify API ---
 function callClockifyAPI($apiKey, $endpoint, $method = 'GET', $queryParams = [], $postData = null) {
-    global $apiBaseUrl;
+    global $apiBaseUrl; 
     $url = $apiBaseUrl . $endpoint;
 
     if (!empty($queryParams) && $method === 'GET') {
@@ -23,8 +40,8 @@ function callClockifyAPI($apiKey, $endpoint, $method = 'GET', $queryParams = [],
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'SimpleClockifyPHPClient/1.0');
+    curl_setopt($ch, CURLOPT_TIMEOUT, 45);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'EnhancedClockifyPHPClient/1.5-daysoffset');
 
     if ($method === 'POST') {
         curl_setopt($ch, CURLOPT_POST, true);
@@ -40,7 +57,7 @@ function callClockifyAPI($apiKey, $endpoint, $method = 'GET', $queryParams = [],
 
     if ($curlError) {
         error_log("cURL Error for $url: " . $curlError);
-        return ['error' => true, 'message' => 'cURL Error: ' . $curlError, 'response_body' => $response];
+        return ['error' => true, 'message' => 'A network error occurred while contacting the API. Please try again.', 'response_body' => ''];
     }
 
     $decodedResponse = json_decode($response, true);
@@ -48,37 +65,59 @@ function callClockifyAPI($apiKey, $endpoint, $method = 'GET', $queryParams = [],
     if ($httpCode >= 200 && $httpCode < 300) {
         return $decodedResponse;
     } else {
-        $errorMessage = "API request failed with HTTP status $httpCode.";
-        if (isset($decodedResponse['message'])) $errorMessage .= " Clockify Message: " . $decodedResponse['message'];
+        $errorMessage = "API request failed (HTTP $httpCode).";
+        $userMessage = 'An error occurred while fetching data from Clockify.';
+        if (isset($decodedResponse['message'])) {
+            $errorMessage .= " Clockify: " . $decodedResponse['message'];
+            if ($httpCode == 401) $userMessage = 'Invalid API Key or insufficient permissions.';
+        }
         if (isset($decodedResponse['code'])) $errorMessage .= " (Code: " . $decodedResponse['code'] . ")";
+        
         error_log("Clockify API Error: HTTP $httpCode, URL: $url, Message: " . $errorMessage . ", Response: " . $response);
-        return ['error' => true, 'http_code' => $httpCode, 'message' => $errorMessage, 'response_body' => $response];
+        return ['error' => true, 'http_code' => $httpCode, 'message' => $userMessage, 'response_body' => ''];
     }
 }
 
-// --- Main Logic ---
-$step = 1; // 1: API Key, 2: Workspace & Date Select, 3: Show Actions
-
-if (isset($_POST['submit_api_key']) && !empty($_POST['api_key'])) {
-    $_SESSION['api_key'] = trim($_POST['api_key']);
-    unset($_SESSION['workspace_id']);
-    unset($_SESSION['date_offset']);
-    $step = 2;
-} elseif (isset($_SESSION['api_key']) && isset($_POST['submit_workspace_date']) && !empty($_POST['workspace_id']) && isset($_POST['date_offset'])) {
-    $_SESSION['workspace_id'] = $_POST['workspace_id'];
-    $_SESSION['date_offset'] = (int)$_POST['date_offset']; // 0 for today, -1 for yesterday
-    $step = 3;
-} elseif (isset($_SESSION['api_key']) && (!isset($_SESSION['workspace_id']) || !isset($_SESSION['date_offset']))) {
-    $step = 2;
-} elseif (isset($_SESSION['api_key']) && isset($_SESSION['workspace_id']) && isset($_SESSION['date_offset'])) {
-    $step = 3;
+// --- Reset functionality ---
+if (isset($_GET['reset'])) {
+    if (ini_get("session.use_cookies")) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000,
+            $params["path"], $params["domain"],
+            $params["secure"], $params["httponly"]
+        );
+    }
+    session_unset(); 
+    session_destroy(); 
+    $_SESSION = array(); 
+    
+    header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); 
+    exit; 
 }
 
-// Reset functionality
-if (isset($_GET['reset'])) {
-    session_destroy();
-    header("Location: " . strtok($_SERVER["REQUEST_URI"], '?'));
+// --- Main Logic for Step Determination ---
+$step = 1; 
+
+if (isset($_POST['form_action']) && $_POST['form_action'] === 'submit_api_key_action' && !empty($_POST['api_key'])) {
+    $_SESSION['api_key'] = trim($_POST['api_key']);
+    if(isset($_SESSION['workspace_id'])) { unset($_SESSION['workspace_id']); }
+    if(isset($_SESSION['date_offset_days'])) { unset($_SESSION['date_offset_days']); } // Changed from date_offset
+    $step = 2; 
+    header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); 
     exit;
+} 
+elseif (isset($_SESSION['api_key']) && isset($_POST['form_action']) && $_POST['form_action'] === 'submit_workspace_date_action' && !empty($_POST['workspace_id']) && isset($_POST['date_offset_days'])) {
+    $_SESSION['workspace_id'] = $_POST['workspace_id'];
+    $_SESSION['date_offset_days'] = abs((int)$_POST['date_offset_days']); // Ensure positive integer, 0 for today
+    $step = 3; 
+    header("Location: " . strtok($_SERVER["REQUEST_URI"], '?')); 
+    exit;
+} 
+elseif (isset($_SESSION['api_key']) && (!isset($_SESSION['workspace_id']) || !isset($_SESSION['date_offset_days']))) {
+    $step = 2; 
+} 
+elseif (isset($_SESSION['api_key']) && isset($_SESSION['workspace_id']) && isset($_SESSION['date_offset_days'])) {
+    $step = 3; 
 }
 
 ?>
@@ -86,248 +125,342 @@ if (isset($_GET['reset'])) {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clockify User Actions (Tehran Time)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>Clockify Actions Viewer (Tehran Time)</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; margin: 0; background-color: #f0f2f5; color: #1c1e21; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 20px; box-sizing: border-box; }
-        .container { width: 100%; max-width: 900px; background-color: #fff; border: 1px solid #dddfe2; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1); padding: 25px; }
-        .error { color: #D8000C; background-color: #FFD2D2; border: 1px solid #D8000C; padding: 12px; margin-bottom: 18px; border-radius: 4px; font-size: 0.95em; }
-        .success { color: #4F8A10; background-color: #DFF2BF; border: 1px solid #4F8A10; padding: 12px; margin-bottom: 18px; border-radius: 4px; font-size: 0.95em; }
-        label { display: block; margin-bottom: 8px; font-weight: 600; color: #606770; }
-        input[type="text"], select { width: 100%; padding: 12px; margin-bottom: 18px; border: 1px solid #ccd0d5; border-radius: 6px; box-sizing: border-box; font-size: 16px; }
-        input[type="submit"] { width: auto; padding: 12px 24px; background-color: #1877f2; color: white; border: none; cursor: pointer; border-radius: 6px; font-size: 16px; font-weight: bold; margin-top:10px; }
-        input[type="submit"]:hover { background-color: #166fe5; }
-        h1, h2, h3, h4 { color: #1c1e21; }
-        h1 { text-align: center; margin-bottom: 25px; font-size: 28px; }
-        h2 { border-bottom: 1px solid #dddfe2; padding-bottom: 12px; margin-top: 30px; margin-bottom: 20px; font-size: 22px;}
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 0.9em; }
-        th, td { border: 1px solid #dddfe2; padding: 10px 12px; text-align: left; vertical-align: top; }
-        th { background-color: #f5f6f7; font-weight: 600; }
-        .user-block { margin-bottom: 30px; padding: 20px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #f9f9f9; }
-        .user-block h4 { margin-top: 0; color: #333; }
-        .reset-link { display: inline-block; text-align: right; margin-bottom:20px; font-size: 0.9em; color: #1877f2; text-decoration: none; float: right; }
-        .reset-link:hover { text-decoration: underline; }
-        .info-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
-        .info-bar p { margin: 0 10px 5px 0; font-size: 0.95em; }
-        .no-entries { padding: 10px; background-color: #f0f0f0; border-radius: 4px; text-align: center; }
-        td em { color: #777; }
-        .date-choice-label { margin-top: 15px; margin-bottom: 5px; }
-        .date-choice input[type="radio"] { margin-right: 5px; vertical-align: middle; }
-        .date-choice label { display: inline; margin-right: 15px; font-weight: normal; }
+        body { background-color: #f8f9fa; padding-top: 70px; }
+        .container-main { margin-top: 20px; margin-bottom: 50px; }
+        .card-header { background-color: #007bff; color: white; }
+        .btn-primary { background-color: #007bff; border-color: #007bff; }
+        .btn-primary:hover { background-color: #0056b3; border-color: #0056b3; }
+        .table-responsive { margin-top: 15px; }
+        .user-block { margin-bottom: 1.5rem; }
+        .user-block .card-header { background-color: #6c757d; }
+        .reset-link { font-size: 0.9em; }
+        .loading-spinner { width: 1rem; height: 1rem; margin-left: 5px; }
+        #main-loader .spinner-border { width: 3rem; height: 3rem; }
+        .info-bar p { margin-bottom: 0.5rem; }
+        .navbar-brand { font-weight: bold; }
+        @media (max-width: 768px) {
+            .info-bar { flex-direction: column; align-items: flex-start !important; }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="?reset=true" class="reset-link">Reset & Start Over</a>
-        <h1>Clockify User Actions (Tehran Time)</h1>
+    <nav class="navbar navbar-dark bg-dark fixed-top">
+        <div class="container">
+            <a class="navbar-brand" href="<?php echo htmlspecialchars(strtok($_SERVER["REQUEST_URI"], '?')); ?>">Clockify Viewer</a>
+            <a href="?reset=true" class="btn btn-outline-light btn-sm reset-link">Reset & Start Over</a>
+        </div>
+    </nav>
 
-        <?php if ($step === 1): ?>
-            <h2>Step 1: Enter Your Clockify API Key</h2>
-            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>">
-                <label for="api_key">API Key:</label>
-                <input type="text" id="api_key" name="api_key" required>
-                <input type="submit" name="submit_api_key" value="Next: Select Workspace">
-            </form>
-        <?php endif; ?>
+    <div class="container container-main">
+        <div class="row justify-content-center">
+            <div class="col-lg-10 col-xl-8">
 
-        <?php
-        if ($step === 2 && isset($_SESSION['api_key'])):
-            $apiKey = $_SESSION['api_key'];
-            $workspaces = callClockifyAPI($apiKey, '/workspaces');
+                <?php if ($step === 1): ?>
+                    <div class="card shadow-sm">
+                        <div class="card-header">
+                            <h5 class="mb-0">Step 1: Enter Your Clockify API Key</h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" onsubmit="return showFormLoader(this, 'submit_api_key_action');">
+                                <input type="hidden" name="form_action" value=""> 
+                                <div class="form-group">
+                                    <label for="api_key">API Key:</label>
+                                    <input type="text" class="form-control" id="api_key" name="api_key" required>
+                                </div>
+                                <button type="submit" name="submit_api_key_button" class="btn btn-primary"> 
+                                    Fetch Workspaces
+                                    <span class="spinner-border spinner-border-sm ml-1 d-none loading-spinner" role="status" aria-hidden="true"></span>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                <?php endif; ?>
 
-            if (isset($workspaces['error']) || !$workspaces) {
-                $errorDetails = htmlspecialchars(is_string($workspaces['message']) ? $workspaces['message'] : json_encode($workspaces));
-                if (isset($workspaces['response_body'])) {
-                     $errorDetails .= "<br><small>Raw Response: " . htmlspecialchars(is_string($workspaces['response_body']) ? $workspaces['response_body'] : json_encode($workspaces['response_body'])) . "</small>";
-                }
-                echo "<p class='error'>Error fetching workspaces. Please check your API key or network connection. <br>Details: " . $errorDetails . "</p>";
-                echo "<p><a href='?reset=true'>Try again with a new API Key</a></p>";
-            } elseif (empty($workspaces)) {
-                echo "<p class='error'>No workspaces found for this API key.</p>";
-                echo "<p><a href='?reset=true'>Try again with a new API Key</a></p>";
-            } else {
-        ?>
-            <h2>Step 2: Select Workspace & Report Date</h2>
-            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>">
-                <label for="workspace_id">Choose a workspace:</label>
-                <select id="workspace_id" name="workspace_id" required>
-                    <?php foreach ($workspaces as $ws): ?>
-                        <option value="<?php echo htmlspecialchars($ws['id']); ?>">
-                            <?php echo htmlspecialchars($ws['name']); ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-
-                <p class="date-choice-label">Choose report date (Tehran Time):</p>
-                <div class="date-choice">
-                    <input type="radio" id="date_today" name="date_offset" value="0" checked>
-                    <label for="date_today">Today</label>
-
-                    <input type="radio" id="date_yesterday" name="date_offset" value="-1">
-                    <label for="date_yesterday">Yesterday</label>
-                </div>
-
-                <input type="submit" name="submit_workspace_date" value="Get User Actions">
-            </form>
-        <?php
-            }
-        endif;
-        ?>
-
-        <?php
-        if ($step === 3 && isset($_SESSION['api_key']) && isset($_SESSION['workspace_id']) && isset($_SESSION['date_offset'])):
-            $apiKey = $_SESSION['api_key'];
-            $workspaceId = $_SESSION['workspace_id'];
-            $dateOffset = $_SESSION['date_offset']; // 0 for today, -1 for yesterday
-
-            $currentWorkspaceDetails = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}");
-            $workspaceName = isset($currentWorkspaceDetails['name']) ? $currentWorkspaceDetails['name'] : $workspaceId;
-
-            // --- Tehran Timezone Logic for selected date ---
-            $tehranTz = new DateTimeZone($tehranTimezoneIdentifier);
-            $utcTz = new DateTimeZone('UTC');
-
-            // Get base date in Tehran (today)
-            $targetDateInTehran = new DateTime('now', $tehranTz);
-
-            // Modify if yesterday was selected
-            if ($dateOffset === -1) {
-                $targetDateInTehran->modify('-1 day');
-            }
-            $tehranDateForDisplay = $targetDateInTehran->format('Y-m-d');
-            $dayNameForDisplay = ($dateOffset === 0) ? "Today" : "Yesterday";
-
-
-            // Calculate start of the selected day in Tehran
-            $startOfDayTehran = new DateTime($targetDateInTehran->format('Y-m-d') . ' 00:00:00', $tehranTz);
-            $startOfDayUtc = clone $startOfDayTehran;
-            $startOfDayUtc->setTimezone($utcTz);
-            $apiStartTime = $startOfDayUtc->format('Y-m-d\TH:i:s\Z');
-
-            // Calculate end of the selected day in Tehran
-            $endOfDayTehran = new DateTime($targetDateInTehran->format('Y-m-d') . ' 23:59:59', $tehranTz);
-            $endOfDayUtc = clone $endOfDayTehran;
-            $endOfDayUtc->setTimezone($utcTz);
-            $apiEndTime = $endOfDayUtc->format('Y-m-d\TH:i:s\Z');
-            // --- End Tehran Timezone Logic ---
-
-            echo "<h2>Step 3: User Actions for " . htmlspecialchars($dayNameForDisplay) . " (" . htmlspecialchars($tehranDateForDisplay) . " Tehran Time)</h2>";
-            echo "<div class='info-bar'>";
-            echo "<p><strong>Workspace:</strong> " . htmlspecialchars($workspaceName) . "</p>";
-            echo "<p><strong>Reporting Date:</strong> " . htmlspecialchars($tehranDateForDisplay) . " (" . htmlspecialchars($dayNameForDisplay) . ", Tehran)</p>";
-            echo "</div>";
-
-
-            $users = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}/users", 'GET', ['status' => 'ACTIVE']);
-
-            if (isset($users['error']) || !$users) {
-                 $errorDetails = htmlspecialchars(is_string($users['message']) ? $users['message'] : json_encode($users));
-                 if (isset($users['response_body'])) {
-                     $errorDetails .= "<br><small>Raw Response: " . htmlspecialchars(is_string($users['response_body']) ? $users['response_body'] : json_encode($users['response_body'])) . "</small>";
-                 }
-                echo "<p class='error'>Error fetching users. <br>Details: " . $errorDetails . "</p>";
-            } elseif (empty($users)) {
-                 echo "<p class='success'>No active users found in this workspace.</p>";
-            } else {
-                $anyActionsFoundOverall = false;
-
-                echo "<h3>Detailed Actions by User:</h3>";
-
-                foreach ($users as $user) {
-                    if (!isset($user['id']) || !isset($user['name'])) {
-                        error_log("User data incomplete: " . json_encode($user));
-                        echo "<div class='user-block'><p class='error'>User data is incomplete for an entry, skipping.</p></div>";
-                        continue;
-                    }
-                    $userId = $user['id'];
-                    $userName = $user['name'];
-                    
-                    echo "<div class='user-block'>";
-                    echo "<h4>User: " . htmlspecialchars($userName) . " (ID: " . htmlspecialchars($userId) . ")</h4>";
-
-                    $timeEntriesParams = [
-                        'start' => $apiStartTime,
-                        'end' => $apiEndTime,
-                        'hydrated' => 'true',
-                        'consider-duration-format' => 'true'
-                    ];
-                    $timeEntries = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}/user/{$userId}/time-entries", 'GET', $timeEntriesParams);
-
-                    if (isset($timeEntries['error'])) {
-                        $errorDetails = htmlspecialchars(is_string($timeEntries['message']) ? $timeEntries['message'] : json_encode($timeEntries));
-                        if (isset($timeEntries['response_body'])) {
-                             $errorDetails .= "<br><small>Raw Response: " . htmlspecialchars(is_string($timeEntries['response_body']) ? $timeEntries['response_body'] : json_encode($timeEntries['response_body'])) . "</small>";
-                        }
-                        echo "<p class='error'>Error fetching time entries for user {$userName}. <br>Details: " . $errorDetails . "</p>";
-                    } elseif (empty($timeEntries)) {
-                        echo "<p class='no-entries'>No time entries found for " . htmlspecialchars($userName) . " on " . htmlspecialchars($tehranDateForDisplay) . ".</p>";
+                <?php
+                if ($step === 2):
+                    if (!isset($_SESSION['api_key'])) {
+                        error_log("Attempted to render Step 2 without API key in session.");
+                        echo "<div class='alert alert-danger'>Session error. Please <a href='?reset=true' class='alert-link'>start over</a>.</div>";
                     } else {
-                        $anyActionsFoundOverall = true;
-                        echo "<table>";
-                        echo "<thead><tr><th>Description</th><th>Project</th><th>Task</th><th>Start Time (Local)</th><th>End Time (Local)</th><th>Duration</th></tr></thead><tbody>";
-                        foreach ($timeEntries as $entry) {
-                            $description = !empty($entry['description']) ? htmlspecialchars($entry['description']) : '<em>(No description)</em>';
-                            $projectName = isset($entry['project']['name']) ? htmlspecialchars($entry['project']['name']) : '<em>N/A</em>';
-                             if (isset($entry['project']['clientName']) && !empty($entry['project']['clientName'])) {
-                                $projectName .= " (" . htmlspecialchars($entry['project']['clientName']) . ")";
-                            }
-                            $taskName = isset($entry['task']['name']) ? htmlspecialchars($entry['task']['name']) : '<em>N/A</em>';
+                        $apiKey = $_SESSION['api_key'];
+                        $workspaces = callClockifyAPI($apiKey, '/workspaces');
 
-                            $durationStr = '<em>N/A</em>';
-                            if (isset($entry['timeInterval']['duration'])) {
-                                try {
-                                    if ($entry['timeInterval']['duration'] === null && $entry['timeInterval']['end'] === null) {
-                                        $durationStr = '<em>Running</em>';
-                                    } else if ($entry['timeInterval']['duration'] !== null) {
-                                        $interval = new DateInterval($entry['timeInterval']['duration']);
-                                        $formattedDuration = '';
-                                        if ($interval->h > 0) $formattedDuration .= $interval->h . 'h ';
-                                        if ($interval->i > 0) $formattedDuration .= $interval->i . 'm ';
-                                        if ($interval->s > 0 || empty($formattedDuration)) $formattedDuration .= $interval->s . 's';
-                                        $durationStr = trim($formattedDuration);
-                                        if(empty($durationStr)) $durationStr = "0s";
-                                    }
-                                } catch (Exception $e) {
-                                     $durationStr = htmlspecialchars($entry['timeInterval']['duration']);
-                                     error_log("Error parsing duration '{$entry['timeInterval']['duration']}': " . $e->getMessage());
-                                }
+                        if (isset($workspaces['error']) || !$workspaces) {
+                            $errorMessage = isset($workspaces['message']) ? htmlspecialchars($workspaces['message']) : 'Could not fetch workspaces. Please check your API key and network connection.';
+                            if (isset($workspaces['http_code']) && $workspaces['http_code'] == 401) {
+                                $errorMessage = 'Invalid API Key. Please check and try again.';
                             }
-                            
-                            $displayTimezone = new DateTimeZone(date_default_timezone_get()); // Server's default. Or use $tehranTz for consistent Tehran time display.
-                            $startTime = '<em>N/A</em>';
-                            if (isset($entry['timeInterval']['start'])) {
-                                $dtStart = new DateTime($entry['timeInterval']['start'], $utcTz);
-                                $dtStart->setTimezone($displayTimezone);
-                                $startTime = $dtStart->format('H:i:s') . ' (' . $dtStart->format('T') . ')';
-                            }
+                            echo "<div class='alert alert-danger' role='alert'>{$errorMessage}</div>";
+                            echo "<p><a href='?reset=true' class='btn btn-secondary btn-sm'>Use a different API Key</a></p>";
+                        } elseif (empty($workspaces)) {
+                            echo "<div class='alert alert-warning' role='alert'>No workspaces found for this API key.</div>";
+                            echo "<p><a href='?reset=true' class='btn btn-secondary btn-sm'>Use a different API Key</a></p>";
+                        } else {
+                ?>
+                    <div class="card shadow-sm">
+                        <div class="card-header">
+                             <h5 class="mb-0">Step 2: Select Workspace & Report Date</h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" onsubmit="return showFormLoader(this, 'submit_workspace_date_action');">
+                                <input type="hidden" name="form_action" value=""> 
+                                <div class="form-group">
+                                    <label for="workspace_id">Choose a workspace:</label>
+                                    <select class="form-control" id="workspace_id" name="workspace_id" required>
+                                        <?php foreach ($workspaces as $ws): ?>
+                                            <option value="<?php echo htmlspecialchars($ws['id']); ?>" <?php echo (isset($_SESSION['workspace_id']) && $_SESSION['workspace_id'] == $ws['id']) ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($ws['name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
 
-                            $endTime = '<em>(Running)</em>';
-                            if (isset($entry['timeInterval']['end'])) {
-                                $dtEnd = new DateTime($entry['timeInterval']['end'], $utcTz);
-                                $dtEnd->setTimezone($displayTimezone);
-                                $endTime = $dtEnd->format('H:i:s') . ' (' . $dtEnd->format('T') . ')';
-                            }
+                                <div class="form-group">
+                                    <label for="date_offset_days">Days to go back (Tehran Time):</label>
+                                    <input type="number" class="form-control" id="date_offset_days" name="date_offset_days" 
+                                           value="<?php echo isset($_SESSION['date_offset_days']) ? htmlspecialchars($_SESSION['date_offset_days']) : '0'; ?>" 
+                                           min="0" required>
+                                    <small class="form-text text-muted">Enter 0 for today, 1 for yesterday, 2 for two days ago, etc.</small>
+                                </div>
+                                <button type="submit" name="submit_workspace_date_button" class="btn btn-primary"> 
+                                    Get User Actions
+                                    <span class="spinner-border spinner-border-sm ml-1 d-none loading-spinner" role="status" aria-hidden="true"></span>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                <?php
+                        } 
+                    } 
+                endif; 
+                ?>
 
-                            echo "<tr>";
-                            echo "<td>" . $description . "</td>";
-                            echo "<td>" . $projectName . "</td>";
-                            echo "<td>" . $taskName . "</td>";
-                            echo "<td>" . $startTime . "</td>";
-                            echo "<td>" . $endTime . "</td>";
-                            echo "<td>" . $durationStr . "</td>";
-                            echo "</tr>";
+                <?php
+                if ($step === 3):
+                    if (!isset($_SESSION['api_key']) || !isset($_SESSION['workspace_id']) || !isset($_SESSION['date_offset_days'])) {
+                         error_log("Attempted to render Step 3 without complete session data.");
+                         echo "<div class='alert alert-danger'>Session error or required data missing. Please <a href='?reset=true' class='alert-link'>start over</a>.</div>";
+                    } else {
+                        $apiKey = $_SESSION['api_key'];
+                        $workspaceId = $_SESSION['workspace_id'];
+                        $dateOffsetDays = abs((int)$_SESSION['date_offset_days']); // Ensure positive integer
+
+                        echo '<div id="main-loader" class="text-center my-4">
+                                <div class="spinner-border text-primary" role="status"></div>
+                                <p class="mt-2">Preparing your report... Please wait.</p>
+                              </div>
+                              <div id="report-content" style="display:none;">';
+
+                        if (ob_get_level() > 0) { ob_flush(); }
+                        flush(); 
+
+                        $currentWorkspaceDetails = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}");
+                        $workspaceName = isset($currentWorkspaceDetails['name']) ? htmlspecialchars($currentWorkspaceDetails['name']) : htmlspecialchars($workspaceId);
+                        if(isset($currentWorkspaceDetails['error'])) {
+                             echo "<div class='alert alert-warning'>Could not fetch workspace name. Using ID.</div>";
                         }
-                        echo "</tbody></table>";
-                    }
-                    echo "</div>"; 
-                }
 
-                if (!$anyActionsFoundOverall && count($users) > 0) {
-                    echo "<p class='success'>All active users checked. No time entries recorded for any user on " . htmlspecialchars($tehranDateForDisplay) . ".</p>";
+                        $tehranTz = new DateTimeZone($tehranTimezoneIdentifier);
+                        $utcTz = new DateTimeZone('UTC');
+                        $targetDateInTehran = new DateTime('now', $tehranTz);
+                        if ($dateOffsetDays > 0) {
+                            $targetDateInTehran->modify("-{$dateOffsetDays} days");
+                        }
+                        $tehranDateForDisplay = $targetDateInTehran->format('Y-m-d');
+                        
+                        $dayNameForDisplay = "";
+                        if ($dateOffsetDays === 0) {
+                            $dayNameForDisplay = "Today";
+                        } elseif ($dateOffsetDays === 1) {
+                            $dayNameForDisplay = "Yesterday";
+                        } else {
+                            $dayNameForDisplay = $dateOffsetDays . " days ago";
+                        }
+
+                        $startOfDayTehran = new DateTime($targetDateInTehran->format('Y-m-d') . ' 00:00:00', $tehranTz);
+                        $startOfDayUtc = clone $startOfDayTehran; $startOfDayUtc->setTimezone($utcTz);
+                        $apiStartTime = $startOfDayUtc->format('Y-m-d\TH:i:s\Z');
+
+                        $endOfDayTehran = new DateTime($targetDateInTehran->format('Y-m-d') . ' 23:59:59', $tehranTz);
+                        $endOfDayUtc = clone $endOfDayTehran; $endOfDayUtc->setTimezone($utcTz);
+                        $apiEndTime = $endOfDayUtc->format('Y-m-d\TH:i:s\Z');
+
+                        echo "<div class='card shadow-sm mb-4'>
+                                <div class='card-header'>
+                                    <h5 class='mb-0'>Report for " . htmlspecialchars($tehranDateForDisplay) . " (" . htmlspecialchars($dayNameForDisplay) . ", Tehran Time)</h5>
+                                </div>
+                                <div class='card-body'>
+                                    <div class='d-flex justify-content-between flex-wrap info-bar'>
+                                        <p><strong>Workspace:</strong> " . $workspaceName . "</p>
+                                        <p><strong>Reporting Date:</strong> " . htmlspecialchars($tehranDateForDisplay) . " (" . htmlspecialchars($dayNameForDisplay) . ", Tehran)</p>
+                                    </div>
+                                </div>
+                              </div>";
+                        
+                        $users = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}/users", 'GET', ['status' => 'ACTIVE']);
+
+                        if (isset($users['error']) || !$users) {
+                            $errorMessage = isset($users['message']) ? htmlspecialchars($users['message']) : 'Could not fetch users for the workspace.';
+                            echo "<div class='alert alert-danger' role='alert'>{$errorMessage}</div>";
+                        } elseif (empty($users)) {
+                            echo "<div class='alert alert-info' role='alert'>No active users found in this workspace.</div>";
+                        } else {
+                            $anyActionsFoundOverall = false;
+                            echo "<h5>Detailed Actions by User:</h5>";
+
+                            $totalUsers = count($users);
+                            $usersProcessed = 0;
+                            echo '<div class="progress mb-3" style="height: 5px;">
+                                    <div id="user-progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                                  </div>';
+
+                            foreach ($users as $user) {
+                                $usersProcessed++;
+                                $progressPercent = ($totalUsers > 0) ? round(($usersProcessed / $totalUsers) * 100) : 0;
+                                echo "<script>var el = document.getElementById('user-progress-bar'); if(el) { el.style.width = '{$progressPercent}%'; el.setAttribute('aria-valuenow', '{$progressPercent}'); }</script>";
+                                if (ob_get_level() > 0) { ob_flush(); } flush();
+
+                                if (!isset($user['id']) || !isset($user['name'])) {
+                                    error_log("User data incomplete in Step 3 loop: " . json_encode($user));
+                                    echo "<div class='alert alert-warning'>Skipping a user due to incomplete data.</div>";
+                                    continue;
+                                }
+                                $userId = $user['id'];
+                                $userName = htmlspecialchars($user['name']);
+
+                                echo "<div class='card user-block shadow-sm'>";
+                                echo "<div class='card-header'><h6 class='mb-0'>User: {$userName} (ID: " . htmlspecialchars($userId) . ")</h6></div>";
+                                echo "<div class='card-body'>";
+                                
+                                $timeEntriesParams = [
+                                    'start' => $apiStartTime, 'end' => $apiEndTime,
+                                    'hydrated' => 'true', 'consider-duration-format' => 'true'
+                                ];
+                                $timeEntries = callClockifyAPI($apiKey, "/workspaces/{$workspaceId}/user/{$userId}/time-entries", 'GET', $timeEntriesParams);
+
+                                if (isset($timeEntries['error'])) {
+                                    $errorMessage = isset($timeEntries['message']) ? htmlspecialchars($timeEntries['message']) : "Could not fetch time entries for {$userName}.";
+                                    echo "<div class='alert alert-danger' role='alert'>{$errorMessage}</div>";
+                                } elseif (empty($timeEntries)) {
+                                    echo "<p class='text-muted'>No time entries found for {$userName} on " . htmlspecialchars($tehranDateForDisplay) . ".</p>";
+                                } else {
+                                    $anyActionsFoundOverall = true;
+                                    echo "<div class='table-responsive'>";
+                                    echo "<table class='table table-striped table-bordered table-hover table-sm'>";
+                                    echo "<thead class='thead-light'><tr><th>Desc.</th><th>Project</th><th>Task</th><th>Start (Local)</th><th>End (Local)</th><th>Duration</th></tr></thead><tbody>";
+                                    foreach ($timeEntries as $entry) {
+                                        $description = !empty($entry['description']) ? htmlspecialchars($entry['description']) : '<em>-</em>';
+                                        $projectName = isset($entry['project']['name']) ? htmlspecialchars($entry['project']['name']) : '<em>-</em>';
+                                        if (isset($entry['project']['clientName']) && !empty($entry['project']['clientName'])) {
+                                            $projectName .= " <small class='text-muted'>(" . htmlspecialchars($entry['project']['clientName']) . ")</small>";
+                                        }
+                                        $taskName = isset($entry['task']['name']) ? htmlspecialchars($entry['task']['name']) : '<em>-</em>';
+
+                                        $durationStr = '<em>-</em>';
+                                        if (isset($entry['timeInterval']['duration'])) {
+                                            try {
+                                                if ($entry['timeInterval']['duration'] === null && $entry['timeInterval']['end'] === null) {
+                                                    $durationStr = '<span class="badge badge-info">Running</span>';
+                                                } else if ($entry['timeInterval']['duration'] !== null) {
+                                                    $interval = new DateInterval($entry['timeInterval']['duration']);
+                                                    $formattedDuration = '';
+                                                    if ($interval->h > 0) $formattedDuration .= $interval->h . 'h ';
+                                                    if ($interval->i > 0) $formattedDuration .= $interval->i . 'm ';
+                                                    if ($interval->s > 0 || empty($formattedDuration)) $formattedDuration .= $interval->s . 's';
+                                                    $durationStr = trim($formattedDuration);
+                                                    if(empty($durationStr)) $durationStr = "0s";
+                                                }
+                                            } catch (Exception $e) {
+                                                 $durationStr = htmlspecialchars($entry['timeInterval']['duration']);
+                                                 error_log("Error parsing duration '{$entry['timeInterval']['duration']}': " . $e->getMessage());
+                                            }
+                                        }
+                                        
+                                        $displayTimezone = new DateTimeZone(date_default_timezone_get());
+                                        $startTime = '<em>-</em>';
+                                        if (isset($entry['timeInterval']['start'])) {
+                                            $dtStart = new DateTime($entry['timeInterval']['start'], $utcTz);
+                                            $dtStart->setTimezone($displayTimezone);
+                                            $startTime = $dtStart->format('H:i:s') . ' <small class="text-muted">(' . $dtStart->format('T') . ')</small>';
+                                        }
+
+                                        $endTime = '<em>-</em>';
+                                        if (isset($entry['timeInterval']['end'])) {
+                                            $dtEnd = new DateTime($entry['timeInterval']['end'], $utcTz);
+                                            $dtEnd->setTimezone($displayTimezone);
+                                            $endTime = $dtEnd->format('H:i:s') . ' <small class="text-muted">(' . $dtEnd->format('T') . ')</small>';
+                                        } elseif ($durationStr === '<span class="badge badge-info">Running</span>') {
+                                            $endTime = '<span class="badge badge-info">Running</span>';
+                                        }
+
+                                        echo "<tr>";
+                                        echo "<td>" . $description . "</td>";
+                                        echo "<td>" . $projectName . "</td>";
+                                        echo "<td>" . $taskName . "</td>";
+                                        echo "<td>" . $startTime . "</td>";
+                                        echo "<td>" . $endTime . "</td>";
+                                        echo "<td>" . $durationStr . "</td>";
+                                        echo "</tr>";
+                                    }
+                                    echo "</tbody></table></div>";
+                                }
+                                echo "</div></div>"; 
+                            } 
+
+                            if (!$anyActionsFoundOverall && count($users) > 0) {
+                                echo "<div class='alert alert-success' role='alert'>All active users checked. No time entries recorded on " . htmlspecialchars($tehranDateForDisplay) . ".</div>";
+                            }
+                            echo "<script>var el = document.getElementById('user-progress-bar'); if(el) { el.style.width = '100%'; el.classList.add('bg-success'); }</script>";
+                        } 
+                        echo '</div>'; 
+                        echo '<script>
+                                var mainLoader = document.getElementById("main-loader");
+                                if(mainLoader) mainLoader.style.display = "none";
+                                var reportContent = document.getElementById("report-content");
+                                if(reportContent) reportContent.style.display = "block";
+                                console.log("Debug JS: Main loader hidden, report content shown by JS.");
+                              </script>';
+                    } 
+                endif; 
+                ?>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.3/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    <script>
+        function showFormLoader(formElement, actionValue) {
+            console.log("Debug JS: showFormLoader called for form:", formElement, "Attempting to set action to:", actionValue);
+            
+            const hiddenActionInput = formElement.querySelector('input[name="form_action"]');
+            if (hiddenActionInput) {
+                hiddenActionInput.value = actionValue;
+                console.log("Debug JS: Set hidden input 'form_action' to:", hiddenActionInput.value);
+            } else {
+                console.error("Debug JS: Hidden input 'form_action' NOT FOUND in form!");
+                alert("A critical form configuration error occurred. Please contact support. (Hidden action input missing)");
+                return false; 
+            }
+
+            const button = formElement.querySelector('button[type="submit"]');
+            if (button) {
+                console.log("Debug JS: Disabling button and showing spinner.");
+                button.disabled = true;
+                const spinner = button.querySelector('.loading-spinner');
+                if (spinner) {
+                    spinner.classList.remove('d-none');
                 }
             }
-        endif;
-        ?>
-    </div>
-</body>
-</html>
+            return true; 
+        }
+        console.log("Debug JS: Main page scripts loaded.");
+    </script>
+<?php
+ob_end_flush(); // Send the output buffer
+?>
